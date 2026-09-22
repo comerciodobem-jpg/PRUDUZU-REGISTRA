@@ -1,0 +1,70 @@
+flowchart TD
+    ORIS["Óris 360"] --> PROD["Módulo Produção"]
+    PROD --> APP["Produzir Registra"]
+
+    APP --> ROLE_OP["Perfil Colaborador"]
+    APP --> ROLE_CF["Perfil Gestor/Conferente"]
+
+    ROLE_OP --> TAB_REG["Registrar"]
+    ROLE_OP --> TAB_DONE["Produzido"]
+    ROLE_OP --> TAB_RES["Nosso Resultado"]
+
+    ROLE_CF --> TAB_REG
+    ROLE_CF --> TAB_DONE
+    ROLE_CF --> TAB_RES
+    ROLE_CF --> TAB_CHECK["Conferir"]
+
+    TAB_REG --> SCAN["Leitura código de barras"]
+    SCAN --> PRODUCT["Produto identificado"]
+    PRODUCT --> QTY["Quantidade declarada"]
+    QTY --> RECORD["Registro de Produção"]
+    RECORD --> PENDING["Aguardando Conferência"]
+
+    PENDING --> INDIV["Produtividade / rastreabilidade individual"]
+    PENDING --> TAB_CHECK
+
+    TAB_CHECK --> CONSOL["Consolidação por produto"]
+    CONSOL --> PHYSICAL["Quantidade física conferida"]
+    PHYSICAL --> DECISION{"Bateu?"}
+    DECISION -->|Sim| CONFIRMED["Confirmado"]
+    DECISION -->|Não| DIVERGENT["Divergente"]
+
+    CONFIRMED --> STOCK_TX["Movimentação oficial de estoque"]
+    DIVERGENT --> STOCK_TX
+
+    STOCK_TX --> FINISHED["Entrada produto acabado"]
+    STOCK_TX --> BOM["Consumo conforme Ficha Técnica"]
+    BOM --> MATERIALS["Matérias-Primas e Insumos"]
+    STOCK_TX --> HISTORY["Histórico auditável"]
+    HISTORY --> KPIS["Indicadores"]
+
+    ORIS --> PRODUCTS["Produtos"]
+    PRODUCTS --> FICHA["Ficha Técnica"]
+    FICHA --> BOM
+    ORIS --> MATERIALS
+    ORIS --> USERS["Colaboradores / usuários"]
+    USERS --> ROLE_OP
+    USERS --> ROLE_CF
+    ORIS --> STOCK["Estoque central"]
+    STOCK_TX --> STOCK
+    STOCK --> ALERTS["Alertas de baixo / crítico"]
+    ALERTS --> APP
+
+    ORIS --> NEED["Necessidade de Produção"]
+    NEED --> TARGET["Alvo + saldo + prioridade"]
+    TARGET --> URGENT["Urgente quando marcado"]
+    RECORD --> MATCH["Vinculação automática quando inequívoca"]
+    MATCH --> NEED
+    NEED --> PROGRESS["Progresso"]
+    PROGRESS --> TAB_RES
+
+    TAB_DONE --> HISTORY
+    TAB_RES --> KPIS
+
+    OFFLINE["Offline / fila local"] --> RECORD
+    RECORD --> SYNC["Sincronização idempotente"]
+    SYNC --> PENDING
+
+    AUDIT["Trilha de auditoria"] --> HISTORY
+    DIVERGENT --> AUDIT
+    STOCK_TX --> AUDIT
