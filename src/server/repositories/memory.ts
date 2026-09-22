@@ -43,6 +43,13 @@ export class MemoryProductionRepository implements ProductionRepository {
     return found ? structuredClone(found) : null;
   }
 
+  async findProductById(companyId: string, productId: string): Promise<Product | null> {
+    const found = this.products.find(
+      (product) => product.companyId === companyId && product.id === productId,
+    );
+    return found ? structuredClone(found) : null;
+  }
+
   async findRecordByIdempotency(
     companyId: string,
     idempotencyKey: string,

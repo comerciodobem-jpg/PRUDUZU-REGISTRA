@@ -30,6 +30,7 @@ export interface ReviewCommit {
 
 export interface ProductionRepository {
   findProductByBarcode(companyId: string, barcode: string): Promise<Product | null>;
+  findProductById(companyId: string, productId: string): Promise<Product | null>;
   findRecordByIdempotency(companyId: string, key: string): Promise<ProductionRecord | null>;
   createRecord(record: ProductionRecord, auditEvents: AuditEvent[]): Promise<ProductionRecord>;
   listRecords(companyId: string): Promise<ProductionRecord[]>;

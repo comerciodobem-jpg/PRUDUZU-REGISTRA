@@ -83,6 +83,7 @@ export interface ProductionRecord {
   companyId: string;
   userId: string;
   employeeId: string;
+  recordedByName: string;
   productId: string;
   barcode: string;
   declaredQuantity: number;

@@ -6,6 +6,8 @@ import {
 } from "../../domain/rules";
 import type {
   AuditEvent,
+  Product,
+  ProductionNeed,
   ProductionRecord,
   ProductionReview,
   SessionActor,
@@ -28,6 +30,26 @@ export interface ReviewProductionInput {
   notes?: string;
 }
 
+export interface VisibleNeed extends ProductionNeed {
+  remainingQuantity: number;
+}
+
+export interface PendingReviewContributor {
+  employeeId: string;
+  userId: string;
+  name: string;
+  quantity: number;
+  recordCount: number;
+}
+
+export interface PendingReviewGroup {
+  product: Product;
+  declaredTotal: number;
+  recordCount: number;
+  contributors: PendingReviewContributor[];
+  oldestRecordedAt: string;
+}
+
 export class ProductionServiceError extends Error {
   constructor(
     public readonly code: string,
@@ -41,6 +63,12 @@ export class ProductionServiceError extends Error {
 
 function ensurePermission(actor: SessionActor, permission: string): void {
   if (!actor.permissions.includes(permission)) {
+    throw new ProductionServiceError("FORBIDDEN", "Ação não permitida.", 403);
+  }
+}
+
+function ensureAnyPermission(actor: SessionActor, permissions: string[]): void {
+  if (!permissions.some((permission) => actor.permissions.includes(permission))) {
     throw new ProductionServiceError("FORBIDDEN", "Ação não permitida.", 403);
   }
 }
@@ -96,6 +124,111 @@ export class ProductionService {
     },
   ) {}
 
+  async lookupProduct(actor: SessionActor, barcode: string): Promise<Product> {
+    ensurePermission(actor, "production.record");
+    const product = await this.repository.findProductByBarcode(
+      actor.companyId,
+      barcode.trim(),
+    );
+    if (!product || !product.active) {
+      throw new ProductionServiceError(
+        "PRODUCT_NOT_FOUND",
+        "Produto não encontrado ou inativo.",
+        404,
+      );
+    }
+    return product;
+  }
+
+  async listVisibleRecords(actor: SessionActor): Promise<ProductionRecord[]> {
+    ensureAnyPermission(actor, ["production.read.self", "production.read.team"]);
+    const records = await this.repository.listRecords(actor.companyId);
+    const visible = actor.permissions.includes("production.read.team")
+      ? records
+      : records.filter((record) => record.userId === actor.userId);
+
+    return visible.toSorted(
+      (a, b) =>
+        new Date(b.recordedAt).getTime() - new Date(a.recordedAt).getTime(),
+    );
+  }
+
+  async listNeeds(actor: SessionActor): Promise<VisibleNeed[]> {
+    ensurePermission(actor, "production.need.read");
+    const needs = await this.repository.listActiveNeeds(actor.companyId);
+    return needs.map((need) => ({
+      ...need,
+      remainingQuantity: Math.max(
+        0,
+        need.targetQuantity - need.confirmedProgressQuantity,
+      ),
+    }));
+  }
+
+  async listPendingReviewGroups(
+    actor: SessionActor,
+  ): Promise<PendingReviewGroup[]> {
+    ensurePermission(actor, "production.review");
+
+    const records = (await this.repository.listRecords(actor.companyId)).filter(
+      (record) => record.reviewStatus === "PENDING_REVIEW",
+    );
+    const byProduct = new Map<string, ProductionRecord[]>();
+
+    for (const record of records) {
+      const current = byProduct.get(record.productId) ?? [];
+      current.push(record);
+      byProduct.set(record.productId, current);
+    }
+
+    const groups: PendingReviewGroup[] = [];
+
+    for (const [productId, productRecords] of byProduct) {
+      const product = await this.repository.findProductById(
+        actor.companyId,
+        productId,
+      );
+      if (!product) continue;
+
+      const contributorMap = new Map<string, PendingReviewContributor>();
+      for (const record of productRecords) {
+        const contributorKey = `${record.userId}:${record.employeeId}`;
+        const existing = contributorMap.get(contributorKey);
+        if (existing) {
+          existing.quantity += record.declaredQuantity;
+          existing.recordCount += 1;
+        } else {
+          contributorMap.set(contributorKey, {
+            employeeId: record.employeeId,
+            userId: record.userId,
+            name: record.recordedByName,
+            quantity: record.declaredQuantity,
+            recordCount: 1,
+          });
+        }
+      }
+
+      groups.push({
+        product,
+        declaredTotal: productRecords.reduce(
+          (sum, record) => sum + record.declaredQuantity,
+          0,
+        ),
+        recordCount: productRecords.length,
+        contributors: [...contributorMap.values()],
+        oldestRecordedAt: productRecords
+          .map((record) => record.recordedAt)
+          .toSorted()[0],
+      });
+    }
+
+    return groups.toSorted(
+      (a, b) =>
+        new Date(a.oldestRecordedAt).getTime() -
+        new Date(b.oldestRecordedAt).getTime(),
+    );
+  }
+
   async recordProduction(
     actor: SessionActor,
     input: RecordProductionInput,
@@ -122,17 +255,7 @@ export class ProductionService {
       return existing;
     }
 
-    const product = await this.repository.findProductByBarcode(
-      actor.companyId,
-      input.barcode.trim(),
-    );
-    if (!product || !product.active) {
-      throw new ProductionServiceError(
-        "PRODUCT_NOT_FOUND",
-        "Produto não encontrado ou inativo.",
-        404,
-      );
-    }
+    const product = await this.lookupProduct(actor, input.barcode);
 
     const needs = await this.repository.listActiveNeeds(
       actor.companyId,
@@ -146,6 +269,7 @@ export class ProductionService {
       companyId: actor.companyId,
       userId: actor.userId,
       employeeId: actor.employeeId,
+      recordedByName: actor.name,
       productId: product.id,
       barcode: product.barcode,
       declaredQuantity: input.quantity,
