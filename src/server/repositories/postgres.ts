@@ -172,6 +172,15 @@ export class PostgresProductionRepository implements ProductionRepository {
     return rows[0] ? productFromRow(rows[0]) : null;
   }
 
+  async listProducts(companyId: string): Promise<Product[]> {
+    const rows = (await getSql()`
+      SELECT * FROM products
+      WHERE company_id = ${companyId} AND active=true
+      ORDER BY name, presentation
+    `) as unknown as Row[];
+    return rows.map(productFromRow);
+  }
+
   async findRecordByIdempotency(
     companyId: string,
     idempotencyKey: string,

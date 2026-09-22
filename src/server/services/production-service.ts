@@ -140,6 +140,11 @@ export class ProductionService {
     return product;
   }
 
+  async listProducts(actor: SessionActor): Promise<Product[]> {
+    ensurePermission(actor, "production.record");
+    return this.repository.listProducts(actor.companyId);
+  }
+
   async listVisibleRecords(actor: SessionActor): Promise<ProductionRecord[]> {
     ensureAnyPermission(actor, ["production.read.self", "production.read.team"]);
     const records = await this.repository.listRecords(actor.companyId);

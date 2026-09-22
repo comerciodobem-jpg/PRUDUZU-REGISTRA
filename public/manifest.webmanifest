@@ -1,0 +1,17 @@
+{
+  "name": "Produzir Registra",
+  "short_name": "Produzir",
+  "description": "Registro operacional de produção do Óris 360",
+  "start_url": "/login",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#0b5fcc",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
