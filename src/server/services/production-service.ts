@@ -147,7 +147,7 @@ export class ProductionService {
       ? records
       : records.filter((record) => record.userId === actor.userId);
 
-    return visible.toSorted(
+    return [...visible].sort(
       (a, b) =>
         new Date(b.recordedAt).getTime() - new Date(a.recordedAt).getTime(),
     );
@@ -218,11 +218,11 @@ export class ProductionService {
         contributors: [...contributorMap.values()],
         oldestRecordedAt: productRecords
           .map((record) => record.recordedAt)
-          .toSorted()[0],
+          .sort()[0],
       });
     }
 
-    return groups.toSorted(
+    return [...groups].sort(
       (a, b) =>
         new Date(a.oldestRecordedAt).getTime() -
         new Date(b.oldestRecordedAt).getTime(),
