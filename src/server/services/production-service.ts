@@ -1,5 +1,17 @@
-import type { SessionActor } from "../../domain/types";
-import type { ProductionRepository } from "../repositories/contracts";
+import { randomUUID } from "node:crypto";
+import {
+  calculateDifference,
+  calculateMaterialConsumption,
+  selectUnambiguousNeed,
+} from "../../domain/rules";
+import type {
+  AuditEvent,
+  ProductionRecord,
+  ProductionReview,
+  SessionActor,
+  StockMovement,
+} from "../../domain/types";
+import type { ProductionRepository, ReviewCommit } from "../repositories/contracts";
 
 export interface RecordProductionInput {
   barcode: string;
@@ -16,17 +28,370 @@ export interface ReviewProductionInput {
   notes?: string;
 }
 
+export class ProductionServiceError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly status = 400,
+  ) {
+    super(message);
+    this.name = "ProductionServiceError";
+  }
+}
+
+function ensurePermission(actor: SessionActor, permission: string): void {
+  if (!actor.permissions.includes(permission)) {
+    throw new ProductionServiceError("FORBIDDEN", "Ação não permitida.", 403);
+  }
+}
+
+function ensurePositiveQuantity(value: number): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new ProductionServiceError(
+      "INVALID_QUANTITY",
+      "A quantidade deve ser maior que zero.",
+      422,
+    );
+  }
+}
+
+function ensureIdempotencyKey(value: string): void {
+  if (!value || value.trim().length < 8) {
+    throw new ProductionServiceError(
+      "INVALID_IDEMPOTENCY_KEY",
+      "Chave de idempotência inválida.",
+      422,
+    );
+  }
+}
+
+function audit(
+  actor: SessionActor,
+  action: string,
+  entityType: string,
+  entityId: string,
+  after?: unknown,
+  before?: unknown,
+  reason?: string,
+): AuditEvent {
+  return {
+    id: randomUUID(),
+    companyId: actor.companyId,
+    actorUserId: actor.userId,
+    action,
+    entityType,
+    entityId,
+    before,
+    after,
+    reason,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 export class ProductionService {
   constructor(
-    private readonly _repository: ProductionRepository,
-    private readonly _options: { allowSelfReview: boolean } = { allowSelfReview: false },
+    private readonly repository: ProductionRepository,
+    private readonly options: { allowSelfReview: boolean } = {
+      allowSelfReview: false,
+    },
   ) {}
 
-  async recordProduction(_actor: SessionActor, _input: RecordProductionInput): Promise<never> {
-    throw new Error("not implemented: recordProduction");
+  async recordProduction(
+    actor: SessionActor,
+    input: RecordProductionInput,
+  ): Promise<ProductionRecord> {
+    ensurePermission(actor, "production.record");
+    ensureIdempotencyKey(input.idempotencyKey);
+    ensurePositiveQuantity(input.quantity);
+
+    const existing = await this.repository.findRecordByIdempotency(
+      actor.companyId,
+      input.idempotencyKey,
+    );
+    if (existing) {
+      if (
+        existing.barcode !== input.barcode ||
+        existing.declaredQuantity !== input.quantity
+      ) {
+        throw new ProductionServiceError(
+          "IDEMPOTENCY_CONFLICT",
+          "A chave já foi usada com outro registro.",
+          409,
+        );
+      }
+      return existing;
+    }
+
+    const product = await this.repository.findProductByBarcode(
+      actor.companyId,
+      input.barcode.trim(),
+    );
+    if (!product || !product.active) {
+      throw new ProductionServiceError(
+        "PRODUCT_NOT_FOUND",
+        "Produto não encontrado ou inativo.",
+        404,
+      );
+    }
+
+    const needs = await this.repository.listActiveNeeds(
+      actor.companyId,
+      product.id,
+    );
+    const selectedNeed = selectUnambiguousNeed(product.id, needs);
+    const now = new Date().toISOString();
+
+    const record: ProductionRecord = {
+      id: randomUUID(),
+      companyId: actor.companyId,
+      userId: actor.userId,
+      employeeId: actor.employeeId,
+      productId: product.id,
+      barcode: product.barcode,
+      declaredQuantity: input.quantity,
+      unit: product.controlUnit,
+      recordedAt: now,
+      localRecordedAt: input.localRecordedAt,
+      syncStatus: "SYNCED",
+      reviewStatus: "PENDING_REVIEW",
+      sourceDeviceId: input.sourceDeviceId,
+      productionNeedId: selectedNeed?.id,
+      idempotencyKey: input.idempotencyKey,
+    };
+
+    const auditEvents: AuditEvent[] = [
+      audit(actor, "production.recorded", "ProductionRecord", record.id, {
+        productId: product.id,
+        declaredQuantity: input.quantity,
+        productionNeedId: selectedNeed?.id ?? null,
+      }),
+    ];
+
+    if (needs.length > 1 && !selectedNeed) {
+      auditEvents.push(
+        audit(
+          actor,
+          "production.need.ambiguous",
+          "Product",
+          product.id,
+          { candidateNeedIds: needs.map((need) => need.id) },
+          undefined,
+          "Mais de uma necessidade ativa para o mesmo produto; vínculo automático omitido.",
+        ),
+      );
+    }
+
+    return this.repository.createRecord(record, auditEvents);
   }
 
-  async reviewProduction(_actor: SessionActor, _input: ReviewProductionInput): Promise<never> {
-    throw new Error("not implemented: reviewProduction");
+  async reviewProduction(
+    actor: SessionActor,
+    input: ReviewProductionInput,
+  ): Promise<ProductionReview> {
+    ensurePermission(actor, "production.review");
+    ensureIdempotencyKey(input.idempotencyKey);
+    ensurePositiveQuantity(input.confirmedQuantity);
+
+    const existing = await this.repository.findReviewByIdempotency(
+      actor.companyId,
+      input.idempotencyKey,
+    );
+    if (existing) {
+      if (
+        existing.productId !== input.productId ||
+        existing.confirmedQuantity !== input.confirmedQuantity
+      ) {
+        throw new ProductionServiceError(
+          "IDEMPOTENCY_CONFLICT",
+          "A chave já foi usada com outra conferência.",
+          409,
+        );
+      }
+      return existing;
+    }
+
+    const allRecords = await this.repository.listRecords(actor.companyId);
+    const records = allRecords.filter(
+      (record) =>
+        record.productId === input.productId &&
+        record.reviewStatus === "PENDING_REVIEW",
+    );
+
+    if (records.length === 0) {
+      throw new ProductionServiceError(
+        "PENDING_REVIEW_NOT_FOUND",
+        "Não há registros pendentes para este produto.",
+        404,
+      );
+    }
+
+    if (
+      !this.options.allowSelfReview &&
+      records.some((record) => record.userId === actor.userId)
+    ) {
+      throw new ProductionServiceError(
+        "SELF_REVIEW_BLOCKED",
+        "Quem registrou esta produção não pode aprová-la.",
+        403,
+      );
+    }
+
+    const declaredTotal = records.reduce(
+      (total, record) => total + record.declaredQuantity,
+      0,
+    );
+    const differenceQuantity = calculateDifference(
+      declaredTotal,
+      input.confirmedQuantity,
+    );
+    const status: ProductionReview["status"] =
+      differenceQuantity === 0 ? "CONFIRMED" : "DIVERGENT";
+    const reviewedAt = new Date().toISOString();
+
+    const review: ProductionReview = {
+      id: randomUUID(),
+      companyId: actor.companyId,
+      productId: input.productId,
+      declaredTotal,
+      confirmedQuantity: input.confirmedQuantity,
+      differenceQuantity,
+      reviewerUserId: actor.userId,
+      reviewedAt,
+      status,
+      notes: input.notes,
+      idempotencyKey: input.idempotencyKey,
+    };
+
+    const finishedBefore = await this.repository.getFinishedStock(
+      actor.companyId,
+      input.productId,
+    );
+    const finishedStockAfter = finishedBefore + input.confirmedQuantity;
+
+    const movements: StockMovement[] = [
+      {
+        id: randomUUID(),
+        companyId: actor.companyId,
+        itemId: input.productId,
+        type: "FINISHED_GOODS_IN",
+        quantity: input.confirmedQuantity,
+        referenceId: review.id,
+        createdAt: reviewedAt,
+      },
+    ];
+    const auditEvents: AuditEvent[] = [];
+    const materialStockAfter: Record<string, number> = {};
+
+    const sheet = await this.repository.getTechnicalSheet(
+      actor.companyId,
+      input.productId,
+    );
+
+    if (sheet) {
+      for (const item of sheet.items) {
+        const availableQuantity = await this.repository.getMaterialStock(
+          actor.companyId,
+          item.materialId,
+        );
+        const consumption = calculateMaterialConsumption({
+          confirmedQuantity: input.confirmedQuantity,
+          quantityPerBase: item.quantityPerBase,
+          availableQuantity,
+        });
+
+        materialStockAfter[item.materialId] = consumption.remainingQuantity;
+
+        if (consumption.consumedQuantity > 0) {
+          movements.push({
+            id: randomUUID(),
+            companyId: actor.companyId,
+            itemId: item.materialId,
+            type: "MATERIAL_CONSUMED",
+            quantity: consumption.consumedQuantity,
+            referenceId: review.id,
+            createdAt: reviewedAt,
+          });
+        }
+
+        if (consumption.shortageQuantity > 0) {
+          movements.push({
+            id: randomUUID(),
+            companyId: actor.companyId,
+            itemId: item.materialId,
+            type: "MATERIAL_SHORTAGE",
+            quantity: consumption.shortageQuantity,
+            referenceId: review.id,
+            createdAt: reviewedAt,
+          });
+          auditEvents.push(
+            audit(
+              actor,
+              "stock.material_shortage_detected",
+              "Material",
+              item.materialId,
+              {
+                requiredQuantity: consumption.requiredQuantity,
+                consumedQuantity: consumption.consumedQuantity,
+                shortageQuantity: consumption.shortageQuantity,
+                technicalSheetId: sheet.id,
+                technicalSheetVersion: sheet.version,
+              },
+              { availableQuantity },
+              "Produção física confirmada com saldo teórico insuficiente.",
+            ),
+          );
+        }
+      }
+    }
+
+    auditEvents.push(
+      audit(
+        actor,
+        "production.reviewed",
+        "ProductionReview",
+        review.id,
+        {
+          productId: input.productId,
+          declaredTotal,
+          confirmedQuantity: input.confirmedQuantity,
+          differenceQuantity,
+          technicalSheetId: sheet?.id ?? null,
+          technicalSheetVersion: sheet?.version ?? null,
+        },
+      ),
+    );
+
+    if (differenceQuantity !== 0) {
+      auditEvents.push(
+        audit(actor, "production.divergence_detected", "ProductionReview", review.id, {
+          declaredTotal,
+          confirmedQuantity: input.confirmedQuantity,
+          differenceQuantity,
+        }),
+      );
+    }
+
+    const needIds = records.map((record) => record.productionNeedId ?? null);
+    const firstNeedId = needIds[0];
+    const allSameNeed =
+      firstNeedId !== null && needIds.every((needId) => needId === firstNeedId);
+
+    const commit: ReviewCommit = {
+      actor,
+      review,
+      recordIds: records.map((record) => record.id),
+      finishedStockAfter,
+      materialStockAfter,
+      movements,
+      auditEvents,
+      needProgress: allSameNeed
+        ? {
+            needId: firstNeedId,
+            confirmedDelta: input.confirmedQuantity,
+          }
+        : undefined,
+    };
+
+    return this.repository.commitReview(commit);
   }
 }
