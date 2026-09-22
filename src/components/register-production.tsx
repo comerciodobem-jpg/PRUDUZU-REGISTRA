@@ -98,7 +98,12 @@ export function RegisterProduction({
       );
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.message ?? "Produto não encontrado.");
+        setProduct(null);
+        setMessage({
+          type: "error",
+          text: data.message ?? "Produto não encontrado.",
+        });
+        return;
       }
       const found = data.product as Product;
       setProduct(found);
@@ -107,7 +112,7 @@ export function RegisterProduction({
       const cached = await getCachedProduct(actor.companyId, normalized).catch(
         () => null,
       );
-      if (cached) {
+      if (cause instanceof TypeError && cached) {
         setProduct(cached);
         setMessage({
           type: "warning",
@@ -117,7 +122,12 @@ export function RegisterProduction({
         setProduct(null);
         setMessage({
           type: "error",
-          text: cause instanceof Error ? cause.message : "Produto não encontrado.",
+          text:
+            cause instanceof TypeError
+              ? "Sem conexão e produto não disponível no catálogo offline."
+              : cause instanceof Error
+                ? cause.message
+                : "Produto não encontrado.",
         });
       }
     } finally {
@@ -149,8 +159,8 @@ export function RegisterProduction({
         quantity: parsedQuantity,
         unit: product!.controlUnit,
         recordedAt: localRecordedAt,
-        reviewStatus: "PENDING_REVIEW",
-        syncStatus: "LOCAL_PENDING",
+        reviewStatus: "PENDING_REVIEW" as const,
+        syncStatus: "LOCAL_PENDING" as const,
       },
       ...current,
     ].slice(0, 6));
